@@ -84,21 +84,24 @@ export class FirefoxClient {
     );
 
     // Subscribe to console and network events for ALL contexts (not just current).
-    // In connect-existing mode Firefox does not negotiate the WebDriver BiDi
-    // webSocketUrl capability (even when --remote-debugging-port is set), so
+    // BiDi requires the WebDriver BiDi endpoint, exposed via the webSocketUrl
+    // session capability. In connect-existing mode this is only present when
+    // Firefox was started with --remote-debugging-port (the Remote Agent);
+    // --marionette alone is not enough. If webSocketUrl is absent,
     // driver.getBidi() returns a half-initialised connection whose subscribe()
-    // never resolves. The resulting hang tears down the whole MCP server. Skip
-    // BiDi subscriptions entirely in that mode; non-BiDi tools (snapshot, click,
-    // fill, navigate, ...) work over Marionette and are unaffected.
-    if (this.core.getOptions().connectExisting) {
-      logDebug('connect-existing mode: skipping BiDi subscriptions (not supported by this Firefox session)');
+    // never resolves and tears down the whole MCP server, so detect it here and
+    // degrade gracefully (non-BiDi tools still work over Marionette).
+    const driverCapabilities = await this.core.getDriver().getCapabilities();
+    const hasBiDiEndpoint = !!driverCapabilities.get('webSocketUrl');
+
+    if (!hasBiDiEndpoint) {
+      logDebug('BiDi endpoint unavailable (webSocketUrl capability absent); skipping console/network/debugging subscriptions. Start Firefox with --remote-debugging-port to enable BiDi.');
       this.consoleEvents = null;
       this.networkEvents = null;
       this.debuggingEvents = null;
     } else {
-      // Failures here are non-fatal: Firefox may not have the Remote Agent / BiDi
-      // enabled. Wrap each subscribe in a timeout so a hanging BiDi handshake
-      // degrades gracefully instead of blocking connect() forever.
+      // Failures here are non-fatal. Wrap each subscribe in a timeout so a
+      // hanging BiDi handshake degrades gracefully instead of blocking connect().
       const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
         Promise.race([
           p,
@@ -111,7 +114,7 @@ export class FirefoxClient {
         try {
           await withTimeout(this.consoleEvents.subscribe(undefined), 5000, 'console.subscribe');
         } catch (e) {
-          logDebug(`Console events unavailable (BiDi not supported by this Firefox session): ${e instanceof Error ? e.message : String(e)}`);
+          logDebug(`Console events unavailable: ${e instanceof Error ? e.message : String(e)}`);
           this.consoleEvents = null;
         }
       }
@@ -119,7 +122,7 @@ export class FirefoxClient {
         try {
           await withTimeout(this.networkEvents.subscribe(undefined), 5000, 'network.subscribe');
         } catch (e) {
-          logDebug(`Network events unavailable (BiDi not supported by this Firefox session): ${e instanceof Error ? e.message : String(e)}`);
+          logDebug(`Network events unavailable: ${e instanceof Error ? e.message : String(e)}`);
           this.networkEvents = null;
         }
       }
@@ -127,7 +130,7 @@ export class FirefoxClient {
         try {
           await withTimeout(this.debuggingEvents.subscribe(), 5000, 'debugging.subscribe');
         } catch (e) {
-          logDebug(`Debugging events unavailable (BiDi not supported by this Firefox session): ${e instanceof Error ? e.message : String(e)}`);
+          logDebug(`Debugging events unavailable: ${e instanceof Error ? e.message : String(e)}`);
           this.debuggingEvents = null;
         }
       }
