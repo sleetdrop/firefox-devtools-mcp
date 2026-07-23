@@ -84,32 +84,52 @@ export class FirefoxClient {
     );
 
     // Subscribe to console and network events for ALL contexts (not just current).
-    // Failures here are non-fatal: Firefox may not have the Remote Agent / BiDi
-    // enabled (e.g. launched with --marionette only, no --remote-debugging-port),
-    // in which case webSocketUrl is absent from capabilities and getBidi() throws.
-    // We degrade gracefully so all non-BiDi tools still work.
-    if (this.consoleEvents) {
-      try {
-        await this.consoleEvents.subscribe(undefined);
-      } catch {
-        logDebug('Console events unavailable (BiDi not supported by this Firefox session)');
-        this.consoleEvents = null;
+    // In connect-existing mode Firefox does not negotiate the WebDriver BiDi
+    // webSocketUrl capability (even when --remote-debugging-port is set), so
+    // driver.getBidi() returns a half-initialised connection whose subscribe()
+    // never resolves. The resulting hang tears down the whole MCP server. Skip
+    // BiDi subscriptions entirely in that mode; non-BiDi tools (snapshot, click,
+    // fill, navigate, ...) work over Marionette and are unaffected.
+    if (this.core.getOptions().connectExisting) {
+      logDebug('connect-existing mode: skipping BiDi subscriptions (not supported by this Firefox session)');
+      this.consoleEvents = null;
+      this.networkEvents = null;
+      this.debuggingEvents = null;
+    } else {
+      // Failures here are non-fatal: Firefox may not have the Remote Agent / BiDi
+      // enabled. Wrap each subscribe in a timeout so a hanging BiDi handshake
+      // degrades gracefully instead of blocking connect() forever.
+      const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+        Promise.race([
+          p,
+          new Promise<T>((_, reject) =>
+            setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+          ),
+        ]);
+
+      if (this.consoleEvents) {
+        try {
+          await withTimeout(this.consoleEvents.subscribe(undefined), 5000, 'console.subscribe');
+        } catch (e) {
+          logDebug(`Console events unavailable (BiDi not supported by this Firefox session): ${e instanceof Error ? e.message : String(e)}`);
+          this.consoleEvents = null;
+        }
       }
-    }
-    if (this.networkEvents) {
-      try {
-        await this.networkEvents.subscribe(undefined);
-      } catch {
-        logDebug('Network events unavailable (BiDi not supported by this Firefox session)');
-        this.networkEvents = null;
+      if (this.networkEvents) {
+        try {
+          await withTimeout(this.networkEvents.subscribe(undefined), 5000, 'network.subscribe');
+        } catch (e) {
+          logDebug(`Network events unavailable (BiDi not supported by this Firefox session): ${e instanceof Error ? e.message : String(e)}`);
+          this.networkEvents = null;
+        }
       }
-    }
-    if (this.debuggingEvents) {
-      try {
-        await this.debuggingEvents.subscribe();
-      } catch {
-        logDebug('Debugging events unavailable (BiDi not supported by this Firefox session)');
-        this.debuggingEvents = null;
+      if (this.debuggingEvents) {
+        try {
+          await withTimeout(this.debuggingEvents.subscribe(), 5000, 'debugging.subscribe');
+        } catch (e) {
+          logDebug(`Debugging events unavailable (BiDi not supported by this Firefox session): ${e instanceof Error ? e.message : String(e)}`);
+          this.debuggingEvents = null;
+        }
       }
     }
   }
